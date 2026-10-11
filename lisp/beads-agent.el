@@ -596,9 +596,19 @@ does nothing to avoid renaming an already-renamed buffer."
              ;; Get working directory: worktree takes precedence over project
              (working-dir (or (oref session worktree-dir)
                               (oref session project-dir))))
-        ;; Rename the buffer and set its working directory
+        ;; Rename the buffer and set its working directory.
+        ;;
+        ;; shell-maker-backed buffers (e.g. the agent-shell backend) must be
+        ;; renamed with `shell-maker-set-buffer-name' rather than a raw
+        ;; `rename-buffer': shell-maker re-derives the shell buffer name from
+        ;; its config and only `shell-maker-set-buffer-name' records the
+        ;; override it needs to keep finding the buffer after a rename.
         (with-current-buffer buffer
-          (rename-buffer new-name t)
+          (if (and (fboundp 'shell-maker-set-buffer-name)
+                   (boundp 'shell-maker--config)
+                   shell-maker--config)
+              (shell-maker-set-buffer-name buffer new-name)
+            (rename-buffer new-name t))
           ;; Set default-directory for worktree support - ensures beads commands
           ;; find the correct .beads database when invoked from this buffer
           (setq-local default-directory working-dir))

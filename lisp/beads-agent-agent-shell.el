@@ -53,6 +53,14 @@
 ;; From acp.el - client shutdown
 (declare-function acp-shutdown "acp")
 
+;; From shell-maker - buffer resolution / output (see the compatibility
+;; section at the bottom of this file).
+(declare-function shell-maker-buffer "shell-maker" (config))
+(declare-function shell-maker-process-name "shell-maker" (config))
+(declare-function shell-maker-finish-output "shell-maker"
+                  (&key config success on-output))
+(defvar shell-maker--config)
+
 ;; Declare external variables
 (defvar agent-shell-agent-configs)
 (defvar agent-shell-preferred-agent-config)
@@ -225,6 +233,59 @@ and has a live process."
 
 (beads-agent--register-backend
  (beads-agent-backend-agent-shell))
+
+;;; shell-maker compatibility
+;;
+;; beads renames agent-shell buffers to its own convention (see
+;; `beads-agent--rename-and-store-buffer').  shell-maker identifies its shell
+;; buffer by re-deriving the name from the config (`name "agent"' ->
+;; `*agent*') and, in the async ACP `session/new' callback, calls
+;; `shell-maker-finish-output' from a buffer where the buffer-local
+;; `shell-maker--config' is unset.  Together these break shell-maker:
+;;
+;;   Error running timer: (wrong-type-argument shell-maker-config nil)
+;;   Error running timer: (wrong-type-argument processp nil)
+;;
+;; These advices make shell-maker tolerate both situations.  They are
+;; registered here (rather than in shell-maker) because only the renaming
+;; performed by beads triggers them.
+
+(defun beads-agent-agent-shell--finish-output-advice (orig &rest args)
+  "Bind `shell-maker--config' when ORIG is called with a valid :config.
+Allows `shell-maker-finish-output' to be called from a buffer other than
+its shell buffer, as agent-shell's async session callback does."
+  (let ((config (plist-get args :config)))
+    (if (not (and config (fboundp 'shell-maker-buffer)))
+        (apply orig args)
+      (let* ((shell-buffer (shell-maker-buffer config))
+             (shell-maker--config config))
+        (with-current-buffer shell-buffer
+          (unless (and (boundp 'shell-maker--config) shell-maker--config)
+            (setq-local shell-maker--config (copy-sequence config))))
+        (apply orig args)))))
+
+(defun beads-agent-agent-shell--buffer-advice (orig config)
+  "Return the real shell buffer for CONFIG, honouring external renames.
+Falls back to the buffer of the live process named after CONFIG when the
+name-derived buffer has no process (which happens after beads renames it)."
+  (let ((derived (funcall orig config)))
+    (if (get-buffer-process derived)
+        derived
+      (let ((proc (get-process (shell-maker-process-name config))))
+        (or (and proc (process-buffer proc))
+            derived)))))
+
+(defun beads-agent-agent-shell--install-shell-maker-advice ()
+  "Install the shell-maker compatibility advices."
+  (advice-add 'shell-maker-finish-output :around
+              #'beads-agent-agent-shell--finish-output-advice
+              '((name . beads-agent-agent-shell-finish-output)))
+  (advice-add 'shell-maker-buffer :around
+              #'beads-agent-agent-shell--buffer-advice
+              '((name . beads-agent-agent-shell-buffer))))
+
+(with-eval-after-load 'shell-maker
+  (beads-agent-agent-shell--install-shell-maker-advice))
 
 
 (provide 'beads-agent-agent-shell)
